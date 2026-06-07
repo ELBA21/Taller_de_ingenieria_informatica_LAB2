@@ -12,6 +12,11 @@ export AWS_DEFAULT_REGION=$REGION # Para asegurar la region en cada comando
 export PAGER=cat # Para que la terminal no se cuelgue con json de confirmacion
 export AWS_PAGER=""
 export CLUSTER=lab2
+export APP=mi-emprendimiento
+export REPO_NAME=${VPC_NAME}-${APP}
+export ACCOUNT=$(aws sts get-caller-identity \
+    --query Account \
+    --output text)
 # =================================
 # SECCION 1: CREACION VPC
 echo "Creando VPC con rango ${VPC_CIDR}"
@@ -187,7 +192,7 @@ if [ -z "$TG_ARN" ] || [ "$TG_ARN" == "None" ]; then
     echo "ERROR: No se pudo crear el Target GROUP"
     exit 1
 else
-    echo "OK:Security Group creado con ID: $TG_ARN"
+    echo "OK:Target group creado con ID: $TG_ARN"
 fi
 # Crear el ALB en subnets públicas
 export ALB_ARN=$(aws elbv2 create-load-balancer \
@@ -196,13 +201,12 @@ export ALB_ARN=$(aws elbv2 create-load-balancer \
   --security-groups $SG_ID \
   --scheme internet-facing \
   --query 'LoadBalancers[0].LoadBalancerArn' --output text)
-if [ -z "$ALB" ] || [ "$ALB" == "None" ]; then
+if [ -z "$ALB_ARN" ] || [ "$ALB_ARN" == "None" ]; then
     echo "ERROR: No se pudo crear el App Load Balancer"
     exit 1
 else
-    echo "OK:Security Group creado con ID: $ALB"
+    echo "OK:App Lad balancer creado con ID: $ALB_ARN"
 fi
-
 
 aws elbv2 create-listener \
   --load-balancer-arn $ALB_ARN \
@@ -210,25 +214,66 @@ aws elbv2 create-listener \
   --default-actions Type=forward,TargetGroupArn=$TG_ARN
 
 
+# ==================
+# SECCION 7: Imagen docker +ECR
+echo "Creando Repositorio ECR: $REPO_NAME"
+# Antes de pushear la imagen docker, creamos el repo ECR para poder alojarla
+# Podria buildear la imagen antes de crear el repo, pero es mas organizado como lo tengo ahora
+export ECR_URI=$(aws ecr create-repository \
+    --repository-name $REPO_NAME \
+    --image-scanning-configuration scanOnPush=true \
+    --query 'repository.repositoryUri' \
+    --output text)
+if [ -z "$ECR_URI" ] || [ "$ECR_URI" == "None" ]; then
+    echo "ERROR: No se pudo crear el repositorio ECR."
+    exit 1
+else
+    echo "OK: Repositorio ECR listo. URI: $ECR_URI"
+fi
+
+echo "Accediendo a ECR"
+aws ecr get-login-password --region $REGION \
+  | docker login --username AWS \
+  --password-stdin $ACCOUNT.dkr.ecr.$REGION.amazonaws.com
+
+# Una vez creado el repo ECR creamos y pusheamos la imagen docker
+echo "Creando la imagen docker"
+docker build -t $APP:1.0 sitio-web/
+# Ejecutamos la imagen para pruebas locales
+docker run --rm -d -p 8080:80 --name $APP $APP:1.0
+echo "Esperamos 5 segundos"
+sleep 5
+curl -sf http://localhost:8080 && echo "OK: sitio responde localmente" || echo "ERROR: sitio no responde"
+# mata el contenedor de prueba ANTES de seguir
+docker kill $APP   
+
+echo "Pusheando imagen docker"
+# tageamos usando semantic version y pusheamos al ECR de AWS
+docker tag $APP:1.0 $ECR_URI:1.0
+docker push $ECR_URI:1.0
+
+cat > taskdef.json <<JSON
+{ "family": "mi-web", "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256", "memory": "512",
+  "executionRoleArn": "arn:aws:iam::${ACCOUNT}:role/ecsTaskExecutionRole",
+  "containerDefinitions": [{ "name": "web",
+    "image": "${ECR_URI}:1.0",
+    "portMappings": [{ "containerPort": 80 }] }] }
+JSON
+
+
 
 
 # ==================
-# SECCION 7: CLUSTER + FARGATE
-#
-#
+# SECCION 8: CLUSTER + FARGATE
+
+echo "Creando $CLUSTER"
 aws ecs create-cluster \
 --cluster-name $CLUSTER \
 --capacity-providers FARGATE \
 --region $REGION
-cat > taskdef.json <<'JSON'
-{ "family": "mi-web", "networkMode": "awsvpc",
-  "requiresCompatibilities": ["FARGATE"],
-  "cpu": "256", "memory": "512",
-  "executionRoleArn": "arn:aws:iam::<ACCOUNT>:role/ecsTaskExecutionRole",
-  "containerDefinitions": [{ "name": "web",
-    "image": "nginx:1.27",
-    "portMappings": [{ "containerPort": 80 }] }] }
-JSON
+
 aws ecs register-task-definition --cli-input-json file://taskdef.json
 
 aws ecs create-service \
@@ -241,6 +286,80 @@ aws ecs create-service \
   --load-balancers \
   "targetGroupArn=$TG_ARN,containerName=web,containerPort=80"
 
+aws ecs wait services-stable \
+    --cluster $CLUSTER \
+    --services $APP-svc
+
 aws ecs update-service \
 --cluster $CLUSTER --service $APP-svc \
 --desired-count 4
+
+export DNS_NAME=$(aws elbv2 describe-load-balancers --load-balancer-arns $ALB_ARN \
+    --query 'LoadBalancers[0].DNSName' \
+    --output text)
+
+sleep 10
+export RESPUESTA_CURL=$(curl -sf http://${DNS_NAME})
+
+# ========================================
+# SECCION LIMPIEZA (CONFIRMAR ANTES)
+# ========================================
+echo ""
+echo "===== LIMPIEZA DE RECURSOS ====="
+read -p "¿Seguro que quieres eliminar todo? Revisa la GUI antes. Escribe 'si' para borrar: " CONFIRM
+if [ "$CONFIRM" != "si" ]; then
+    echo "Limpieza cancelada. Nada se borró."
+    exit 0
+fi
+
+echo "Eliminando service..."
+aws ecs update-service --cluster $CLUSTER --service $APP-svc --desired-count 0
+aws ecs delete-service --cluster $CLUSTER --service $APP-svc --force
+aws ecs wait services-inactive \
+    --cluster $CLUSTER \
+    --services $APP-svc
+
+
+echo "ELiminando repositorio ECR..."
+aws ecr delete-repository --repository-name $REPO_NAME --force
+
+echo "Eliminando cluster..."
+aws ecs delete-cluster --cluster $CLUSTER
+
+echo "Eliminando ALB..."
+aws elbv2 delete-load-balancer --load-balancer-arn $ALB_ARN
+
+echo "Eliminando Target Group..."
+aws elbv2 delete-target-group --target-group-arn $TG_ARN
+
+echo "Eliminando Security Group..."
+aws ec2 delete-security-group --group-id $SG_ID
+
+echo "Desasociando route tables..."
+# Desconectamos la SUBNET_PUB_B
+aws ec2 disassociate-route-table \
+    --association-id $(aws ec2 describe-route-tables \
+    --route-table-id $RT_ID \
+    --query 'RouteTables[0].Associations[1].RouteTableAssociationId' \
+    --output text)
+# Desconectamos la SUBNET_PUB_A
+aws ec2 disassociate-route-table \
+    --association-id $(aws ec2 describe-route-tables \
+    --route-table-id $RT_ID \
+    --query 'RouteTables[0].Associations[0].RouteTableAssociationId' \
+    --output text)
+aws ec2 delete-route-table --route-table-id $RT_ID
+
+echo "Desadjuntando y eliminando Internet Gateway..."
+aws ec2 detach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+aws ec2 delete-internet-gateway --internet-gateway-id $IGW_ID
+
+echo "Eliminando subnets..."
+aws ec2 delete-subnet --subnet-id $SUBNET_PUB_A
+aws ec2 delete-subnet --subnet-id $SUBNET_PUB_B
+
+echo "Eliminando VPC..."
+aws ec2 delete-vpc --vpc-id $VPC_ID
+
+echo ""
+echo "===== TODOS LOS RECURSOS ELIMINADOS ====="
