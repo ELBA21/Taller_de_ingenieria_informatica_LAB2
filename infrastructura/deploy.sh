@@ -14,6 +14,7 @@ export PAGER=cat # Para que la terminal no se cuelgue con json de confirmacion
 export AWS_PAGER=""
 export CLUSTER=lab2
 export APP=mi-emprendimiento
+export SEMANTIC_VERSION=1.0
 export REPO_NAME=${VPC_NAME}-${APP}
 export ACCOUNT=$(aws sts get-caller-identity \
     --query Account \
@@ -269,9 +270,12 @@ aws ecr get-login-password --region $REGION \
 
 # Una vez creado el repo ECR creamos y pusheamos la imagen docker
 echo "Creando la imagen docker"
-docker build -t $APP:1.0 sitio-web/
+# se elimina alguna POSIBLE imagen docker anterior
+docker system prune -f 2>/dev/null 
+docker rmi $APP:$SEMANTIC_VERSION 2>/dev/null || true
+docker build --no-cache -t $APP:$SEMANTIC_VERSION sitio-web/
 # Ejecutamos la imagen para pruebas locales
-docker run --rm -d -p 8080:80 --name $APP $APP:1.0
+docker run --rm -d -p 8080:80 --name $APP $APP:$SEMANTIC_VERSION
 echo "Esperamos 5 segundos"
 sleep 5
 curl -sf http://localhost:8080 && echo "OK: sitio responde localmente" || echo "ERROR: sitio no responde"
@@ -280,8 +284,8 @@ docker kill $APP
 
 echo "Pusheando imagen docker"
 # tageamos usando semantic version y pusheamos al ECR de AWS
-docker tag $APP:1.0 $ECR_URI:1.0
-docker push $ECR_URI:1.0
+docker tag $APP:$SEMANTIC_VERSION $ECR_URI:$SEMANTIC_VERSION
+docker push $ECR_URI:$SEMANTIC_VERSION
 
 cat > taskdef.json <<JSON
 { "family": "mi-web", "networkMode": "awsvpc",
@@ -289,7 +293,7 @@ cat > taskdef.json <<JSON
   "cpu": "256", "memory": "512",
   "executionRoleArn": "arn:aws:iam::${ACCOUNT}:role/ecsTaskExecutionRole",
   "containerDefinitions": [{ "name": "web",
-    "image": "${ECR_URI}:1.0",
+    "image": "${ECR_URI}:${SEMANTIC_VERSION}",
     "portMappings": [{ "containerPort": 80 }] }] }
 JSON
 
@@ -355,7 +359,7 @@ fi
 
 echo "Eliminando service..."
 aws ecs update-service --cluster $CLUSTER --service $APP-svc --desired-count 0
-echo "Esperando que las tareas se detengan (puede tomar ~1-2 min)..."
+echo "Esperando que las tareas se detengan"
 aws ecs wait services-stable \
     --cluster $CLUSTER \
     --services $APP-svc
@@ -367,41 +371,56 @@ aws ecs wait services-inactive \
 
 echo "ELiminando repositorio ECR..."
 aws ecr delete-repository --repository-name $REPO_NAME --force
-
+sleep 1
 echo "Eliminando cluster..."
 aws ecs delete-cluster --cluster $CLUSTER
+sleep 1
 
 echo "Eliminando ALB..."
 aws elbv2 delete-load-balancer --load-balancer-arn $ALB_ARN
+sleep 1
+echo "Esperando eliminacion del ALB"
+aws elbv2 wait load-balancers-deleted --load-balancer-arns $ALB_ARN
+sleep 1
+
+echo "Eliminando interfaces de red residuales..."
+for eni in $(aws ec2 describe-network-interfaces \
+    --filters Name=vpc-id,Values=$VPC_ID \
+    --query 'NetworkInterfaces[?Status!=`available`].NetworkInterfaceId' \
+    --output text); do
+    aws ec2 delete-network-interface --network-interface-id $eni 2>/dev/null || true
+done
+sleep 10
 
 echo "Eliminando Target Group..."
 aws elbv2 delete-target-group --target-group-arn $TG_ARN
+sleep 1
 
 echo "Eliminando Security Group..."
 aws ec2 delete-security-group --group-id $SG_ID
+sleep 1
 
 echo "Desasociando route tables..."
-# Desconectamos la SUBNET_PUB_B
-aws ec2 disassociate-route-table \
-    --association-id $(aws ec2 describe-route-tables \
-    --route-table-id $RT_ID \
-    --query 'RouteTables[0].Associations[1].RouteTableAssociationId' \
-    --output text)
-# Desconectamos la SUBNET_PUB_A
-aws ec2 disassociate-route-table \
-    --association-id $(aws ec2 describe-route-tables \
-    --route-table-id $RT_ID \
-    --query 'RouteTables[0].Associations[0].RouteTableAssociationId' \
-    --output text)
+aws ec2 describe-route-tables --route-table-id $RT_ID \
+    --query 'RouteTables[0].Associations[?Main!=`true`].RouteTableAssociationId' \
+    --output text | tr '\t' '\n' | while read assoc_id; do
+    [ -n "$assoc_id" ] && aws ec2 disassociate-route-table --association-id "$assoc_id"
+done
+sleep 1
 aws ec2 delete-route-table --route-table-id $RT_ID
+sleep 1
 
 echo "Desadjuntando y eliminando Internet Gateway..."
 aws ec2 detach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+sleep 1
 aws ec2 delete-internet-gateway --internet-gateway-id $IGW_ID
+sleep 1
 
 echo "Eliminando subnets..."
 aws ec2 delete-subnet --subnet-id $SUBNET_PUB_A
+sleep 1
 aws ec2 delete-subnet --subnet-id $SUBNET_PUB_B
+sleep 1
 
 echo "Eliminando VPC..."
 aws ec2 delete-vpc --vpc-id $VPC_ID
