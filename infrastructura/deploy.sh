@@ -12,8 +12,46 @@ export AWS_DEFAULT_REGION=$REGION # Para asegurar la region en cada comando
 export PAGER=cat # Para que la terminal no se cuelgue con json de confirmacion
 export AWS_PAGER=""
 export CLUSTER=lab2
+export APP=mi-emprendimiento
+export REPO_NAME=${VPC_NAME}-${APP}
+export ACCOUNT=$(aws sts get-caller-identity \
+    --query Account \
+    --output text)
+
 # =================================
-# SECCION 1: CREACION VPC
+# SECCION 1: Creacion ROL IAM
+echo "Verificando rol ecsTaskExecutionRole..."
+ROLE_EXISTS=$(aws iam get-role --role-name ecsTaskExecutionRole --query 'Role.RoleName' --output text 2>/dev/null)
+if [ "$ROLE_EXISTS" == "ecsTaskExecutionRole" ]; then
+    echo "OK: El rol ecsTaskExecutionRole ya existe."
+else
+    echo "El rol no existe, creando..."
+    cat > /tmp/ecs-trust-policy.json <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Service": "ecs-tasks.amazonaws.com" },
+    "Action": "sts:AssumeRole"
+  }]
+}
+JSON
+    aws iam create-role \
+        --role-name ecsTaskExecutionRole \
+        --assume-role-policy-document file:///tmp/ecs-trust-policy.json
+
+    aws iam attach-role-policy \
+        --role-name ecsTaskExecutionRole \
+        --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+    echo "OK: Rol ecsTaskExecutionRole creado y politica adjuntada."
+    rm -f /tmp/ecs-trust-policy.json
+fi
+
+
+
+# =================================
+# SECCION 2: CREACION VPC + SUBNETS Publicas
 echo "Creando VPC con rango ${VPC_CIDR}"
 # Creamos la VPC con el CIDR indicado previamente y guardamos su ID
 export VPC_ID=$(aws ec2 create-vpc \
@@ -39,10 +77,6 @@ echo "$VPC_ID ahora se llama $VPC_NAME"
 aws ec2 modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames
 
 
-
-# ================================
-# SECCION 2: CREAR SUBNET
-# ================================
 echo "Iniciando creacion de subnet publica en zona A"
 # Creamos una subnet en el mismo rango de la VPC, esta sera la subnet Publica, habilitada en la region, hardcodeamos que sea 'us-east-1a'
 export SUBNET_PUB_A=$(aws ec2 create-subnet\
@@ -55,11 +89,9 @@ export SUBNET_PUB_A=$(aws ec2 create-subnet\
 if [ -z "$SUBNET_PUB_A" ] || [ "$SUBNET_PUB_A" == "None" ]; then
     echo "ERROR: No se pudo crear la SUBNET Publica en zona A."
     exit 1
-
 else
     echo "OK: SUBNET Publica creada con ID: $SUBNET_PUB_A"
 fi
-
 # Aprovecho que VPC_NAME es lab2 para asignar nombres de forma mas consistente
 aws ec2 create-tags --resources $SUBNET_PUB_A --tags Key=Name,Value=${VPC_NAME}-Subnet-Pub-A
 # Asigna Ip publicas automaticamente
@@ -76,16 +108,11 @@ export SUBNET_PUB_B=$(aws ec2 create-subnet\
 if [ -z "$SUBNET_PUB_B" ] || [ "$SUBNET_PUB_B" == "None" ]; then
     echo "ERROR: No se pudo crear la SUBNET Publica en zona B."
     exit 1
-
 else
     echo "OK: SUBNET Publica creada con ID: $SUBNET_PUB_B"
 fi
-
 aws ec2 create-tags --resources $SUBNET_PUB_B --tags Key=Name,Value=${VPC_NAME}-Subnet-Pub-B
 aws ec2 modify-subnet-attribute --subnet-id $SUBNET_PUB_B --map-public-ip-on-launch
-
-
-
 
 
 # ================================
@@ -129,7 +156,8 @@ fi
 # Me vuelvo a aprovechar de VPC_NAME para nombrar cosas, ahora el route-table
 aws ec2 create-tags --resources $RT_ID --tags Key=Name,Value=${VPC_NAME}-Public-RT
 # Damos acceso global (0.0.0.0/0) al internetgateway
-aws ec2 create-route --route-table-id $RT_ID --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID
+aws ec2 create-route --route-table-id $RT_ID \
+    --destination-cidr-block 0.0.0.0/0 --gateway-id $IGW_ID
 # Conectamos dicho acceso global a nuestra subnet publica
 aws ec2 associate-route-table --route-table-id $RT_ID --subnet-id $SUBNET_PUB_A
 aws ec2 associate-route-table --route-table-id $RT_ID --subnet-id $SUBNET_PUB_B
@@ -141,8 +169,8 @@ aws ec2 associate-route-table --route-table-id $RT_ID --subnet-id $SUBNET_PUB_B
 # SECCION 5: Security Group
 
 # Creamos el security group y guardamos su id
-# Le ponemos un nombre, como curiosidad al principio lo llame 'sg-lab', amazon da error automatico con eso
 # El SG es asignado a la VPC ya creada
+echo "Iniciando creacion de segurity grup"
 export SG_ID=$(aws ec2 create-security-group \
     --group-name lab2-security-group \
     --description "lab SG" \
@@ -162,14 +190,14 @@ aws ec2 authorize-security-group-ingress \
     --protocol tcp \
     --port 80 \
     --cidr 0.0.0.0/0
-# Dejamos el puerto ssh (22) disponible unicamente para nuestra Ip personal
-aws ec2 authorize-security-group-ingress \
-    --group-id $SG_ID \
-    --protocol tcp \
-    --port 22 \
-    --cidr $(curl -s ifconfig.me)/32 
-
-
+# Comento la seccion de ssh, la justificacion? disminuir superficie de ataque
+# Por que no lo borro entonces? Por si acaso xd
+# aws ec2 authorize-security-group-ingress \
+#     --group-id $SG_ID \
+#     --protocol tcp \
+#     --port 22 \
+#     --cidr $(curl -s ifconfig.me)/32 
+#
 # ========================================
 # SECCION 6: TARGET GROUP y ALB
 
@@ -187,7 +215,7 @@ if [ -z "$TG_ARN" ] || [ "$TG_ARN" == "None" ]; then
     echo "ERROR: No se pudo crear el Target GROUP"
     exit 1
 else
-    echo "OK:Security Group creado con ID: $TG_ARN"
+    echo "OK:Target group creado con ID: $TG_ARN"
 fi
 # Crear el ALB en subnets públicas
 export ALB_ARN=$(aws elbv2 create-load-balancer \
@@ -196,39 +224,84 @@ export ALB_ARN=$(aws elbv2 create-load-balancer \
   --security-groups $SG_ID \
   --scheme internet-facing \
   --query 'LoadBalancers[0].LoadBalancerArn' --output text)
-if [ -z "$ALB" ] || [ "$ALB" == "None" ]; then
+if [ -z "$ALB_ARN" ] || [ "$ALB_ARN" == "None" ]; then
     echo "ERROR: No se pudo crear el App Load Balancer"
     exit 1
 else
-    echo "OK:Security Group creado con ID: $ALB"
+    echo "OK:App Lad balancer creado con ID: $ALB_ARN"
 fi
-
 
 aws elbv2 create-listener \
   --load-balancer-arn $ALB_ARN \
   --protocol HTTP --port 80 \
   --default-actions Type=forward,TargetGroupArn=$TG_ARN
 
+aws elbv2 wait load-balancer-available --load-balancer-arn $ALB_ARN
+
 
 
 
 # ==================
-# SECCION 7: CLUSTER + FARGATE
-#
-#
+# SECCION 7: Imagen docker +ECR + IAM
+
+echo "Creando Repositorio ECR: $REPO_NAME"
+# Antes de pushear la imagen docker, creamos el repo ECR para poder alojarla
+# Podria buildear la imagen antes de crear el repo, pero es mas organizado como lo tengo ahora
+export ECR_URI=$(aws ecr create-repository \
+    --repository-name $REPO_NAME \
+    --image-scanning-configuration scanOnPush=true \
+    --query 'repository.repositoryUri' \
+    --output text)
+if [ -z "$ECR_URI" ] || [ "$ECR_URI" == "None" ]; then
+    echo "ERROR: No se pudo crear el repositorio ECR."
+    exit 1
+else
+    echo "OK: Repositorio ECR listo. URI: $ECR_URI"
+fi
+
+echo "Accediendo a ECR"
+aws ecr get-login-password --region $REGION \
+  | docker login --username AWS \
+  --password-stdin $ACCOUNT.dkr.ecr.$REGION.amazonaws.com
+
+# Una vez creado el repo ECR creamos y pusheamos la imagen docker
+echo "Creando la imagen docker"
+docker build -t $APP:1.0 sitio-web/
+# Ejecutamos la imagen para pruebas locales
+docker run --rm -d -p 8080:80 --name $APP $APP:1.0
+echo "Esperamos 5 segundos"
+sleep 5
+curl -sf http://localhost:8080 && echo "OK: sitio responde localmente" || echo "ERROR: sitio no responde"
+# mata el contenedor de prueba ANTES de seguir
+docker kill $APP   
+
+echo "Pusheando imagen docker"
+# tageamos usando semantic version y pusheamos al ECR de AWS
+docker tag $APP:1.0 $ECR_URI:1.0
+docker push $ECR_URI:1.0
+
+cat > taskdef.json <<JSON
+{ "family": "mi-web", "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256", "memory": "512",
+  "executionRoleArn": "arn:aws:iam::${ACCOUNT}:role/ecsTaskExecutionRole",
+  "containerDefinitions": [{ "name": "web",
+    "image": "${ECR_URI}:1.0",
+    "portMappings": [{ "containerPort": 80 }] }] }
+JSON
+
+
+
+
+# ==================
+# SECCION 8: CLUSTER + FARGATE
+
+echo "Creando cluster $CLUSTER"
 aws ecs create-cluster \
 --cluster-name $CLUSTER \
 --capacity-providers FARGATE \
 --region $REGION
-cat > taskdef.json <<'JSON'
-{ "family": "mi-web", "networkMode": "awsvpc",
-  "requiresCompatibilities": ["FARGATE"],
-  "cpu": "256", "memory": "512",
-  "executionRoleArn": "arn:aws:iam::<ACCOUNT>:role/ecsTaskExecutionRole",
-  "containerDefinitions": [{ "name": "web",
-    "image": "nginx:1.27",
-    "portMappings": [{ "containerPort": 80 }] }] }
-JSON
+
 aws ecs register-task-definition --cli-input-json file://taskdef.json
 
 aws ecs create-service \
@@ -241,6 +314,94 @@ aws ecs create-service \
   --load-balancers \
   "targetGroupArn=$TG_ARN,containerName=web,containerPort=80"
 
+aws ecs wait services-stable \
+    --cluster $CLUSTER \
+    --services $APP-svc
+
 aws ecs update-service \
 --cluster $CLUSTER --service $APP-svc \
 --desired-count 4
+
+aws ecs wait services-stable \
+    --cluster $CLUSTER \
+    --services $APP-svc
+
+
+export DNS_NAME=$(aws elbv2 describe-load-balancers --load-balancer-arns $ALB_ARN \
+    --query 'LoadBalancers[0].DNSName' \
+    --output text)
+
+sleep 10
+echo "Veriicando http://${DNS_NAME}"
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://${DNS_NAME})
+if [ "$HTTP_CODE" = "200" ]; then
+    echo "OK: Sitio responde con HTTP $HTTP_CODE en http://${DNS_NAME}"
+else
+    echo "ERROR: Sitio respondió con HTTP $HTTP_CODE (esperado 200)"
+fi
+# ========================================
+# SECCION LIMPIEZA (CONFIRMAR ANTES)
+# ========================================
+echo ""
+echo "===== LIMPIEZA DE RECURSOS ====="
+read -p "¿Seguro que quieres eliminar todo? Revisa la GUI antes. Escribe 'si' para borrar: " CONFIRM
+if [ "$CONFIRM" != "si" ]; then
+    echo "Limpieza cancelada. Nada se borró."
+    exit 0
+fi
+
+echo "Eliminando service..."
+aws ecs update-service --cluster $CLUSTER --service $APP-svc --desired-count 0
+echo "Esperando que las tareas se detengan (puede tomar ~1-2 min)..."
+aws ecs wait services-stable \
+    --cluster $CLUSTER \
+    --services $APP-svc
+aws ecs delete-service --cluster $CLUSTER --service $APP-svc
+aws ecs wait services-inactive \
+    --cluster $CLUSTER \
+    --services $APP-svc
+
+
+echo "ELiminando repositorio ECR..."
+aws ecr delete-repository --repository-name $REPO_NAME --force
+
+echo "Eliminando cluster..."
+aws ecs delete-cluster --cluster $CLUSTER
+
+echo "Eliminando ALB..."
+aws elbv2 delete-load-balancer --load-balancer-arn $ALB_ARN
+
+echo "Eliminando Target Group..."
+aws elbv2 delete-target-group --target-group-arn $TG_ARN
+
+echo "Eliminando Security Group..."
+aws ec2 delete-security-group --group-id $SG_ID
+
+echo "Desasociando route tables..."
+# Desconectamos la SUBNET_PUB_B
+aws ec2 disassociate-route-table \
+    --association-id $(aws ec2 describe-route-tables \
+    --route-table-id $RT_ID \
+    --query 'RouteTables[0].Associations[1].RouteTableAssociationId' \
+    --output text)
+# Desconectamos la SUBNET_PUB_A
+aws ec2 disassociate-route-table \
+    --association-id $(aws ec2 describe-route-tables \
+    --route-table-id $RT_ID \
+    --query 'RouteTables[0].Associations[0].RouteTableAssociationId' \
+    --output text)
+aws ec2 delete-route-table --route-table-id $RT_ID
+
+echo "Desadjuntando y eliminando Internet Gateway..."
+aws ec2 detach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID
+aws ec2 delete-internet-gateway --internet-gateway-id $IGW_ID
+
+echo "Eliminando subnets..."
+aws ec2 delete-subnet --subnet-id $SUBNET_PUB_A
+aws ec2 delete-subnet --subnet-id $SUBNET_PUB_B
+
+echo "Eliminando VPC..."
+aws ec2 delete-vpc --vpc-id $VPC_ID
+
+echo ""
+echo "===== TODOS LOS RECURSOS ELIMINADOS ====="
