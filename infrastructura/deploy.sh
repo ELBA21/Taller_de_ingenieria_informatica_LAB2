@@ -1,5 +1,6 @@
 #!/bin/bash
-
+# Esto deberia ayudar 
+export MSYS2_ARG_CONV_EXCL="*"
 # Aprovecharemos el script del laboratorio 1
 
 echo "|== iniciando ==|"
@@ -203,6 +204,7 @@ aws ec2 authorize-security-group-ingress \
 
 
 # Crear Target Group
+echo "Iniciando creacion de target group"
 export TG_ARN=$(aws elbv2 create-target-group \
   --name web-tg \
   --protocol HTTP --port 80 \
@@ -218,6 +220,7 @@ else
     echo "OK:Target group creado con ID: $TG_ARN"
 fi
 # Crear el ALB en subnets públicas
+echo "Iniciando creacion de App load balancer"
 export ALB_ARN=$(aws elbv2 create-load-balancer \
   --name web-alb \
   --subnets $SUBNET_PUB_A $SUBNET_PUB_B \
@@ -326,7 +329,7 @@ aws ecs wait services-stable \
     --cluster $CLUSTER \
     --services $APP-svc
 
-
+echo "Creando DNS para acceder a paginas"
 export DNS_NAME=$(aws elbv2 describe-load-balancers --load-balancer-arns $ALB_ARN \
     --query 'LoadBalancers[0].DNSName' \
     --output text)
