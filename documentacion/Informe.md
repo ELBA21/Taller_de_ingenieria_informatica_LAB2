@@ -12,10 +12,10 @@ subject: "Taller de Ingenieria Informatica"
 
 ## b) Justificación técnica
 
-### Creacion de rol IAM
+### Creación de rol IAM
 
-- En esta seccion analizamos si existe un rol IAM con los permisos necesarios para, ejecutar las tareas de ECS. En caso de no existir, se crea un nuevo rol con la siguiente politica de confianza:
-- El rol esta definido por el siguiente JSON
+- En esta sección analizamos si existe un rol IAM con los permisos necesarios para ejecutar las tareas de ECS. En caso de no existir, se crea un nuevo rol con la siguiente política de confianza:
+- El rol esta definido por el siguiente JSON:
 
 ```json
 {
@@ -30,9 +30,9 @@ subject: "Taller de Ingenieria Informatica"
 }
 ```
 
-### Creacion de VPC y Subnets
+### Creación de VPC y Subnets
 
-- Creamos una VPC con el siguiente comando
+- Creamos una VPC con el siguiente comando:
 
 ```bash
 VPC_CIDR="10.0.0.0/16"
@@ -44,7 +44,7 @@ export VPC_ID=$(aws ec2 create-vpc \
 - Se eligió el bloque CIDR `10.0.0.0` ya que es un bloque privado que no se superpone con la mayoría de las redes públicas, lo que reduce el riesgo de conflictos de IP al conectar con otras redes o servicios en la nube.
 - El bloque CIDR `/16` proporciona un rango amplio de direcciones IP (más de 65000) para acomodar múltiples subredes, instancias y servicios dentro de la VPC, lo que es ideal para un proyecto de este calibre.
 
-- Se crean 2 SUBENTS con los siguientes comandos:
+- Se crean 2 SUBNETS con los siguientes comandos:
 
 ```bash
 export SUBNET_PUB_A=$(aws ec2 create-subnet\
@@ -68,15 +68,12 @@ export SUBNET_PUB_B=$(aws ec2 create-subnet\
 - Las subnet obtienen acceso a internet gracias al `Internet Gateway` y la `Route Table`
 
 ```bash
-# Crear Internet Gateway y es asociado a la VPC
 export IGW_ID=$(aws ec2 create-internet-gateway \
   --query 'InternetGateway.InternetGatewayId' \
   --output text)
-# Creamos route table
 export RT_ID=$(aws ec2 create-route-table \
   --vpc-id $VPC_ID --query 'RouteTable.RouteTableId' --output text)
 
-# A travez de la route table proporcionamos acceso a internet a las subnets publicas
 aws ec2 associate-route-table --route-table-id $RT_ID --subnet-id $SUBNET_PUB_A
 aws ec2 associate-route-table --route-table-id $RT_ID --subnet-id $SUBNET_PUB_B
 
@@ -84,7 +81,7 @@ aws ec2 associate-route-table --route-table-id $RT_ID --subnet-id $SUBNET_PUB_B
 
 ### Security Group
 
-- Creamos security group lo asociamos a la VPC
+- Creamos security group y lo asociamos a la VPC
 
 ```bash
 export SG_ID=$(aws ec2 create-security-group \
@@ -95,7 +92,7 @@ export SG_ID=$(aws ec2 create-security-group \
     --output text)
 ```
 
-- Se agregab reglas para permitir trafico HTTP (puerto 80)
+- Se agregan reglas para permitir tráfico HTTP (puerto 80)
 
 ```bash
 aws ec2 authorize-security-group-ingress \
@@ -105,13 +102,12 @@ aws ec2 authorize-security-group-ingress \
     --cidr 0.0.0.0/0
 ```
 
-> [!NOTE]
-> En esta ocacion no se uso una regla para permitir trafico SSH, ya que no es necesaria.
+- En esta ocasión no se usó una regla para permitir tráfico SSH, ya que no es necesaria.
 
 ### Target Group y Application Load Balancer
 
-- El **Target Group** es el grupo de destinos al cual el balanceador enviara trafico.
-- Se crea con el siguiente comando.
+- El Target Group es el grupo de destinos al cual el balanceador enviará tráfico.
+- Se crea con el siguiente comando:
 
 ```bash
 export TG_ARN=$(aws elbv2 create-target-group \
@@ -123,9 +119,9 @@ export TG_ARN=$(aws elbv2 create-target-group \
   --query 'TargetGroups[0].TargetGroupArn' --output text)
 ```
 
-- Se utiliza `--target-type ip` porque **Fargate exige este tipo**.
-- El healt check se configura para verificar la salud de las tareas, asegurando que solo las instancias saludables reciban tráfico.
-- Al Application Load Balancer (ALB) se le asigna el Target Group generado anteriormente y las 2 subnets publicas.
+- Se utiliza `--target-type ip` porque Fargate exige este tipo.
+- El health check se configura para verificar la salud de las tareas, asegurando que solo las instancias saludables reciban tráfico.
+- Al Application Load Balancer (ALB) se le asigna el Target Group generado anteriormente y las 2 subnets publicás.
 - Se crea el ALB con el siguiente comando:
 
 ```bash
@@ -137,7 +133,7 @@ export ALB_ARN=$(aws elbv2 create-load-balancer \
   --query 'LoadBalancers[0].LoadBalancerArn' --output text)
 ```
 
-- El ALB tiene un DNS publico accesible desde internet. Todo el trafico HTTP del sitio pasa por aqui.
+- El ALB tiene un DNS público accesible desde internet. Todo el tráfico HTTP del sitio pasa por aquí.
 
 - Finalmente se crea el listener con el siguiente comando:
 
@@ -148,7 +144,7 @@ aws elbv2 create-listener \
   --default-actions Type=forward,TargetGroupArn=$TG_ARN
 ```
 
-- El listener escucha el puerto 80 y reenvia el trafico, sin el el ALB no sabe donde enviar el trafico.
+- El listener escucha el puerto 80 y reenvía el tráfico, sin el el ALB no sabe dónde enviar el tráfico.
 
 ### Cluster ECR
 
@@ -169,8 +165,8 @@ FROM nginx:1.27-alpine
 COPY . /usr/share/nginx/html
 ```
 
-- Notar que usamos una version especifica y liviana.
-- Esta imagen es pusheada al repositorio ECR para usarla despues.
+- Notar que usamos una versión específica y liviana.
+- Esta imagen es pusheada al repositorio ECR para usarla despúes.
 
 ```bash
 docker tag $APP:$SEMANTIC_VERSION $ECR_URI:$SEMANTIC_VERSION
@@ -199,10 +195,10 @@ docker push $ECR_URI:$SEMANTIC_VERSION
 }
 ```
 
-- Elegimos la combinacion minima valida de CPU y memoeria para reducir costos al minimo, no requeriamos mas para un sitio estatico.
+- Elegimos la combinación mínima válida de CPU y memoria para reducir costos al mínimo, no requeríamos más para un sitio estático.
 - Notar que le damos el rol que creamos al principio.
-- Ademas en la seccionn `image`, le entregamos la imagen docker del repositorio ECR.
-- Sacamos la aplicacion por el puerto 80, que es el puerto de escucha del ALB, definido en el SG.
+- Además en la sección `image`, le entregamos la imagen docker del repositorio ECR.
+- Sacamos la aplicación por el puerto 80, que es el puerto de escucha del ALB, definido en el SG.
 
 ### Cluster ECS
 
@@ -229,10 +225,10 @@ aws ecs create-service \
   "targetGroupArn=$TG_ARN,containerName=web,containerPort=80"
 ```
 
-- Lo mas importante a destacar:
+- Lo más importante a destacar:
   - `--desired-count 2`: Define 2 intancias de la tarea para alta disponibilidad.
   - `--launch-type FARGATE`: Usa Fargate que a pesar de ser mas caro que EC2, tiene la ventaja de que no debemos preocuparnos por servidores ya que AWS se encarga de eso.
-  - `--network-configuration`: Asocia las subnets publicas y el security group
+  - `--network-configuration`: Asocia las subnets públicas y el security group
 
 - Posteriormente aumentamos la cantidad de tareas a 4 para escalar el sistema.
 
@@ -242,8 +238,8 @@ aws ecs update-service \
   --desired-count 4
 ```
 
-- Para poder acceder a las paginas facilmente creamos un DNS
-- Ademas probamos el DNS, en caso de que no funcione, se informa por terminal el error.
+- Para poder acceder a las páginas fácilmente creamos un DNS
+- Además probamos el DNS, en caso de que no funcione, se informa por terminal el error.
 
 ```bash
 export DNS_NAME=$(aws elbv2 describe-load-balancers --load-balancer-arns $ALB_ARN \
@@ -309,7 +305,7 @@ aws ec2 delete-vpc --vpc-id $VPC_ID
 
 ```
 
-## Justificacion de costos
+## Justificación de costos
 
 Respecto a los costos de Fargate podemos estimar lo siguiente
 
@@ -319,4 +315,22 @@ Respecto a los costos de Fargate podemos estimar lo siguiente
 | GB de RAM   | $0,00445 USD |
 | Hora de ALB | $0,0225 USD  |
 
-![Costos de Amazon](https://aws.amazon.com/es/fargate/pricing/)
+- Pero nosotros estamos usando 256 de CPU y 512 de RAM, lo que se traduce a:
+  - Un cuarto de CPU virtual, lo que es aproximadamente $0,01012 USD/hrs, es decir 7.2 USD al mes.
+  - Medio GB de RAM, lo que es aproximadamente $0,002225 USD/hrs, es decir 1.6 USD al mes.
+  - Por lo tanto cada tarea cuesta aproximadamente $8.8 USD al mes, y como tenemos 4 tareas, el costo total de las tareas es de aproximadamente $35.2 USD al mes.
+  - Además el ALB cuesta aproximadamente $16.2 USD al mes
+  - Esto es un costo total de aproximadamente $51.4 USD al mes.
+    [Costos de Amazon](https://aws.amazon.com/es/fargate/pricing/)
+
+- Mientras tanto usar EC2, usando 4 instancias t3.micro he aproximado un costo de 30USD al mes.
+  ![Precio Mensual según calculadora](../documentacion/src/CostoMensualEC2.png)
+  [Calculadora de Precios Amazon](https://calculator.aws/#/estimate)
+
+- Por lo tanto a pesar de poseer ahora una estructura teóricamente más cara, es altamente más robusta y escalable, además no requiere de mantenimiento constante ya que AWS se encarga de eso.
+
+## Capturas
+
+![ECR](../documentacion/src/ECR.png)
+![Captura Sitio Web](../documentacion/src/anti-turismo-puertoMontt.png)
+![Service Running](../documentacion/src/ServiceRunning.png)

@@ -8,5 +8,15 @@
 ## Tecnologias
 
 - **Cloud**: AWS
-- Web: RELLENARACA
+- Web: Anti-Turismo Puerto Montt
 - Otros: Docker
+
+## Intrucciones
+
+Clonar repositorio
+
+Ejecutar
+
+```bash
+bash infrastructura/deploy.sh
+```
